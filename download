@@ -1,0 +1,41 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+env/
+.venv/
+ENV/
+
+# Environment variables (NEVER commit secrets)
+.env
+.env.local
+
+# Database (do not commit real patient data)
+instance/*.db
+instance/*.sqlite3
+*.db
+*.sqlite3
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Flask
+*.pid
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
