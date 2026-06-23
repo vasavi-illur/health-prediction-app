@@ -1,0 +1,28 @@
+/**
+ * MIRA Health Records — frontend interactivity.
+ *
+ * Currently handles one job: wiring the shared delete-confirmation
+ * modal in index.html so each row's trash icon can reuse a single
+ * modal instance instead of rendering one modal per row.
+ */
+
+document.addEventListener("DOMContentLoaded", function () {
+    var deleteModalEl = document.getElementById("deleteModal");
+    if (!deleteModalEl) {
+        return; // Not on a page that has the delete modal (e.g. form pages).
+    }
+
+    var deleteForm = document.getElementById("deleteForm");
+    var deleteNameEl = document.getElementById("deletePatientName");
+
+    deleteModalEl.addEventListener("show.bs.modal", function (event) {
+        var triggerButton = event.relatedTarget;
+        if (!triggerButton) return;
+
+        var patientId = triggerButton.getAttribute("data-patient-id");
+        var patientName = triggerButton.getAttribute("data-patient-name");
+
+        deleteNameEl.textContent = patientName;
+        deleteForm.action = "/patients/" + patientId + "/delete";
+    });
+});

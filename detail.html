@@ -1,0 +1,242 @@
+"""
+HTTP routes for the Health Prediction App.
+
+All five CRUD-related pages live in this single blueprint since the
+app has only one resource (patient records). If the app grew to cover
+multiple resources, each would get its own blueprint file following
+this same pattern.
+"""
+
+import sqlite3
+from datetime import date
+from flask import (
+    Blueprint, current_app, flash, redirect, render_template,
+    request, url_for, jsonify
+)
+
+from app.database import get_db
+from app.validators import validate_patient_form
+from app.ai_service import predict_health_risk
+
+main_bp = Blueprint("main", __name__)
+
+
+@main_bp.route("/")
+def index():
+    """List all patient records, most recently added first."""
+    db = get_db()
+    search_query = (request.args.get("q") or "").strip()
+
+    if search_query:
+        # Wrap in % wildcards for a partial, case-insensitive match.
+        like_pattern = f"%{search_query}%"
+        rows = db.execute(
+            """
+            SELECT * FROM patients
+            WHERE full_name LIKE ? OR email LIKE ?
+            ORDER BY created_at DESC
+            """,
+            (like_pattern, like_pattern),
+        ).fetchall()
+    else:
+        rows = db.execute(
+            "SELECT * FROM patients ORDER BY created_at DESC"
+        ).fetchall()
+
+    return render_template("index.html", patients=rows, search_query=search_query)
+
+
+@main_bp.route("/patients/new", methods=["GET", "POST"])
+def create_patient():
+    """Render the new-patient form (GET) or save a new record (POST)."""
+    if request.method == "GET":
+        return render_template(
+            "form.html", mode="create", patient=None, errors={}, form_data={},
+            today=date.today().isoformat(),
+        )
+
+    errors, cleaned_data = validate_patient_form(request.form)
+
+    if errors:
+        flash("Please fix the highlighted fields and try again.", "danger")
+        return render_template(
+            "form.html",
+            mode="create",
+            patient=None,
+            errors=errors,
+            form_data=request.form,
+            today=date.today().isoformat(),
+        ), 400
+
+    remark, risk_level = predict_health_risk(
+        cleaned_data["glucose"],
+        cleaned_data["haemoglobin"],
+        cleaned_data["cholesterol"],
+        api_key=current_app.config.get("HEALTH_API_KEY"),
+    )
+
+    db = get_db()
+    try:
+        db.execute(
+            """
+            INSERT INTO patients
+                (full_name, date_of_birth, email, glucose, haemoglobin,
+                 cholesterol, remarks, risk_level)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                cleaned_data["full_name"],
+                cleaned_data["date_of_birth"],
+                cleaned_data["email"],
+                cleaned_data["glucose"],
+                cleaned_data["haemoglobin"],
+                cleaned_data["cholesterol"],
+                remark,
+                risk_level,
+            ),
+        )
+        db.commit()
+    except sqlite3.Error as exc:
+        # Defensive guard: a database failure should produce a clean
+        # user-facing message instead of a raw 500 stack trace.
+        current_app.logger.error("Failed to insert patient record: %s", exc)
+        flash("A database error occurred while saving the record. Please try again.", "danger")
+        return render_template(
+            "form.html", mode="create", patient=None, errors={}, form_data=request.form,
+            today=date.today().isoformat(),
+        ), 500
+
+    flash(f"Record for {cleaned_data['full_name']} created successfully.", "success")
+    return redirect(url_for("main.index"))
+
+
+@main_bp.route("/patients/<int:patient_id>/edit", methods=["GET", "POST"])
+def edit_patient(patient_id):
+    """Render the edit form (GET) or apply updates (POST) for one record."""
+    db = get_db()
+    patient = db.execute(
+        "SELECT * FROM patients WHERE id = ?", (patient_id,)
+    ).fetchone()
+
+    if patient is None:
+        flash("That patient record could not be found.", "warning")
+        return redirect(url_for("main.index"))
+
+    if request.method == "GET":
+        return render_template(
+            "form.html", mode="edit", patient=patient, errors={}, form_data=patient,
+            today=date.today().isoformat(),
+        )
+
+    errors, cleaned_data = validate_patient_form(request.form)
+
+    if errors:
+        flash("Please fix the highlighted fields and try again.", "danger")
+        return render_template(
+            "form.html",
+            mode="edit",
+            patient=patient,
+            errors=errors,
+            form_data=request.form,
+            today=date.today().isoformat(),
+        ), 400
+
+    # Re-run the prediction since lab values may have changed.
+    remark, risk_level = predict_health_risk(
+        cleaned_data["glucose"],
+        cleaned_data["haemoglobin"],
+        cleaned_data["cholesterol"],
+        api_key=current_app.config.get("HEALTH_API_KEY"),
+    )
+
+    try:
+        db.execute(
+            """
+            UPDATE patients
+            SET full_name = ?, date_of_birth = ?, email = ?, glucose = ?,
+                haemoglobin = ?, cholesterol = ?, remarks = ?, risk_level = ?,
+                updated_at = datetime('now')
+            WHERE id = ?
+            """,
+            (
+                cleaned_data["full_name"],
+                cleaned_data["date_of_birth"],
+                cleaned_data["email"],
+                cleaned_data["glucose"],
+                cleaned_data["haemoglobin"],
+                cleaned_data["cholesterol"],
+                remark,
+                risk_level,
+                patient_id,
+            ),
+        )
+        db.commit()
+    except sqlite3.Error as exc:
+        current_app.logger.error("Failed to update patient %s: %s", patient_id, exc)
+        flash("A database error occurred while updating the record. Please try again.", "danger")
+        return render_template(
+            "form.html", mode="edit", patient=patient, errors={}, form_data=request.form,
+            today=date.today().isoformat(),
+        ), 500
+
+    flash(f"Record for {cleaned_data['full_name']} updated successfully.", "success")
+    return redirect(url_for("main.index"))
+
+
+@main_bp.route("/patients/<int:patient_id>/delete", methods=["POST"])
+def delete_patient(patient_id):
+    """Delete a single patient record."""
+    db = get_db()
+    patient = db.execute(
+        "SELECT full_name FROM patients WHERE id = ?", (patient_id,)
+    ).fetchone()
+
+    if patient is None:
+        flash("That patient record could not be found.", "warning")
+        return redirect(url_for("main.index"))
+
+    try:
+        db.execute("DELETE FROM patients WHERE id = ?", (patient_id,))
+        db.commit()
+    except sqlite3.Error as exc:
+        current_app.logger.error("Failed to delete patient %s: %s", patient_id, exc)
+        flash("A database error occurred while deleting the record. Please try again.", "danger")
+        return redirect(url_for("main.index")), 500
+
+    flash(f"Record for {patient['full_name']} deleted.", "success")
+    return redirect(url_for("main.index"))
+
+
+@main_bp.route("/patients/<int:patient_id>")
+def view_patient(patient_id):
+    """Show the full detail view of a single patient record."""
+    db = get_db()
+    patient = db.execute(
+        "SELECT * FROM patients WHERE id = ?", (patient_id,)
+    ).fetchone()
+
+    if patient is None:
+        flash("That patient record could not be found.", "warning")
+        return redirect(url_for("main.index"))
+
+    return render_template("detail.html", patient=patient)
+
+
+@main_bp.route("/api/patients/<int:patient_id>")
+def api_get_patient(patient_id):
+    """
+    JSON endpoint for a single patient record.
+
+    Provided so the frontend JavaScript (or any external tool) can
+    fetch a record without a full page reload, e.g. for the inline
+    "quick view" modal used in the records table.
+    """
+    db = get_db()
+    patient = db.execute(
+        "SELECT * FROM patients WHERE id = ?", (patient_id,)
+    ).fetchone()
+
+    if patient is None:
+        return jsonify({"error": "Patient not found"}), 404
+
+    return jsonify(dict(patient))

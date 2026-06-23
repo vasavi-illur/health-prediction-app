@@ -1,0 +1,50 @@
+"""
+Application factory for the Health Prediction App.
+
+This module wires together configuration, the database layer, and the
+HTTP routes. Using the "application factory" pattern (a create_app()
+function instead of a bare module-level Flask object) keeps the app
+testable and avoids import-order problems as the project grows.
+"""
+
+import os
+from flask import Flask
+
+from app.config import Config
+from app.database import init_db, close_db
+
+
+def create_app(config_class=Config):
+    """
+    Construct and configure the Flask application.
+
+    Args:
+        config_class: a Config class (or subclass) providing settings
+                       such as SECRET_KEY and DATABASE_PATH.
+
+    Returns:
+        A fully configured Flask app instance, ready to run.
+    """
+    app = Flask(__name__, instance_relative_config=True)
+    app.config.from_object(config_class)
+
+    # Make sure the instance folder (where the SQLite file lives) exists.
+    os.makedirs(app.instance_path, exist_ok=True)
+
+    # Create tables on first run if they do not already exist.
+    with app.app_context():
+        init_db(app)
+
+    # Close the per-request DB connection automatically when each
+    # request finishes, so we never leak SQLite connections.
+    app.teardown_appcontext(close_db)
+
+    # Register the routes defined in app/routes.py.
+    from app.routes import main_bp
+    app.register_blueprint(main_bp)
+
+    # Register friendly error pages.
+    from app.errors import register_error_handlers
+    register_error_handlers(app)
+
+    return app

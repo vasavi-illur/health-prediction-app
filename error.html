@@ -1,0 +1,89 @@
+"""
+Input validation for patient records.
+
+Keeping validation in one dedicated module (rather than scattered
+inline checks inside the route handlers) makes the rules easy to find,
+easy to unit-test, and easy to reuse between the "create" and "update"
+flows so the two can never silently drift apart.
+
+validate_patient_form() returns a (errors, cleaned_data) tuple:
+  - errors: a dict of {field_name: "human readable message"}, empty if
+            the submission is fully valid.
+  - cleaned_data: the parsed/normalised values (e.g. glucose as float,
+            not str) ready to be passed straight into the database layer.
+"""
+
+import re
+from datetime import date, datetime
+
+EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def _parse_number(raw_value, field_label, errors, cleaned_data, field_key):
+    """Validate that raw_value is a real number, then store it as a float."""
+    try:
+        value = float(raw_value)
+    except (TypeError, ValueError):
+        errors[field_key] = f"{field_label} must be a numeric value."
+        return
+    if value < 0:
+        errors[field_key] = f"{field_label} cannot be negative."
+        return
+    cleaned_data[field_key] = value
+
+
+def validate_patient_form(form):
+    """
+    Validate a submitted patient form.
+
+    Args:
+        form: a dict-like object (e.g. Flask's request.form) containing
+              full_name, date_of_birth, email, glucose, haemoglobin,
+              cholesterol.
+
+    Returns:
+        (errors, cleaned_data) -- see module docstring.
+    """
+    errors = {}
+    cleaned_data = {}
+
+    # --- Full name -----------------------------------------------------
+    full_name = (form.get("full_name") or "").strip()
+    if not full_name:
+        errors["full_name"] = "Full name is required."
+    elif len(full_name) > 120:
+        errors["full_name"] = "Full name must be 120 characters or fewer."
+    else:
+        cleaned_data["full_name"] = full_name
+
+    # --- Date of birth ---------------------------------------------------
+    dob_raw = (form.get("date_of_birth") or "").strip()
+    if not dob_raw:
+        errors["date_of_birth"] = "Date of birth is required."
+    else:
+        try:
+            dob = datetime.strptime(dob_raw, "%Y-%m-%d").date()
+            if dob > date.today():
+                errors["date_of_birth"] = "Date of birth cannot be in the future."
+            elif dob.year < 1900:
+                errors["date_of_birth"] = "Please enter a realistic date of birth."
+            else:
+                cleaned_data["date_of_birth"] = dob.isoformat()
+        except ValueError:
+            errors["date_of_birth"] = "Date of birth must be a valid date (YYYY-MM-DD)."
+
+    # --- Email -------------------------------------------------------
+    email = (form.get("email") or "").strip()
+    if not email:
+        errors["email"] = "Email address is required."
+    elif not EMAIL_PATTERN.match(email):
+        errors["email"] = "Please enter a valid email address."
+    else:
+        cleaned_data["email"] = email
+
+    # --- Numeric lab values --------------------------------------------
+    _parse_number(form.get("glucose"), "Glucose", errors, cleaned_data, "glucose")
+    _parse_number(form.get("haemoglobin"), "Haemoglobin", errors, cleaned_data, "haemoglobin")
+    _parse_number(form.get("cholesterol"), "Cholesterol", errors, cleaned_data, "cholesterol")
+
+    return errors, cleaned_data
